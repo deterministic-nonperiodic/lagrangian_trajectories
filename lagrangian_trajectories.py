@@ -80,6 +80,11 @@ class LagrangianTrajectories:
         num_particles = len(initial_positions)
         times = np.arange(0, num_steps * self.dt, self.dt)
 
+        # Check if time is within data bounds: avoid unnecessary calculations
+        rel_time = self.rel_time.astype(float)
+        times = times[(times >= np.min(rel_time)) & (times <= np.max(rel_time))]
+
+        # calculate integration time span
         time_span = (times[0], times[-1])
 
         # Define integration function: We are solving dx/dt = v(t, x, y, z)
