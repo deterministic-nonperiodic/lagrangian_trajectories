@@ -106,7 +106,7 @@ class LagrangianTrajectories:
         )
 
         # transform time back to datetime
-        times = pd.to_datetime(times, origin=self.wind.time[0].values, unit='s')
+        times = pd.to_datetime(times, origin=self.start_time, unit='s')
 
         # Create xarray dataset with trajectories
         trajectories = xr.Dataset(
