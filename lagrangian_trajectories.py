@@ -54,13 +54,6 @@ class LagrangianTrajectories:
         # convert relative to absolute time
         time = pd.to_datetime(time, origin=self.start_time, unit='s')
 
-        # print(self.wind.lon.values.min() < x < self.wind.lon.values.max(),
-        #       self.wind.lat.values.min() < y < self.wind.lat.values.max(),
-        #       self.wind.z_mc.values.min() < z < self.wind.z_mc.values.max(),
-        #       self.wind.z_ifc.values.min() < z < self.wind.z_ifc.values.max(),
-        #       time, self.wind.time[0].values, self.wind.time[-1].values
-        #       )
-
         # Create interpolation points: (time, z, lat, lon)
         points = dict(z_mc=z, z_ifc=z, lat=y, lon=x)
 
