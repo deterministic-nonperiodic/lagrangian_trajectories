@@ -56,7 +56,9 @@ class LagrangianTrajectories:
 
         # Create interpolation points: (time, z, lat, lon)
         points = dict(z_mc=z, z_ifc=z, lat=y, lon=x)
-
+        
+        # Perform interpolation. Velocity is set to zero if the particle leaves the domain
+        # TODO: check for early termination
         wind = self.wind.interp(time=time, **points, method='linear', kwargs={'fill_value': 0.0})
 
         if self.verbose:
