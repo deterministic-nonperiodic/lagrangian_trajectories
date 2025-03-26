@@ -12,8 +12,8 @@ transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 
 
 class LagrangianTrajectories:
-    def __init__(self, data, dt=60, integration_method="RK2", start_time=None,
-                 interpolation_method="linear", verbose=False):
+    def __init__(self, data, dt=60, integration_method="RK23", start_time=None,
+                 interpolation_method="linear", verbose=False, ensemble=False):
         """
         Initialize the Lagrangian trajectory calculator.
 
@@ -21,7 +21,11 @@ class LagrangianTrajectories:
         - wind_data: xarray.Dataset containing 'u', 'v', 'w' wind components
           with dimensions ('time', 'z', 'lat', 'lon')
         - dt: Time step in seconds (default: 60s)
-        - method: Integration method, one of ['Euler', 'RK2', 'RK3'] (default: 'RK2')
+        - integration_method: Integration method, one of ['RK23', 'RK45', 'DOP853', 'LSODA'] (default: 'RK2')
+        - interpolation_method: Interpolation method, one of ['linear', 'nearest']
+        - start_time: Start time for the simulation in format 'yyyy-mm-ddTHH:MM:SS'
+        - verbose: Print maximum wind velocity at each time step
+        - ensemble: Compute ensemble trajectories (default: False)
         """
         self.wind = data[["u", "v", "w"]]
         self.dt = dt
@@ -61,8 +65,8 @@ class LagrangianTrajectories:
         points = dict(z_mc=z, z_ifc=z, lat=y, lon=x)
 
         # Perform interpolation. Velocity is set to zero if the particle leaves the domain
-        wind = self.wind.interp(time=time, **points,
-                                method=self.interp_method, kwargs={'fill_value': 0.0})
+        wind = self.wind.interp(time=time, **points, method=self.interp_method,
+                                kwargs={'fill_value': 0.0})
 
         if self.verbose:
             print(time, "Max u: ", wind.u.max().values, " Max w: ", wind.w.max().values)
@@ -103,7 +107,9 @@ class LagrangianTrajectories:
 
         for i, init_pos in enumerate(initial_positions):
             # transform initial position to meters: Transpose lat/lon
-            init_pos[0], init_pos[1] = transformer.transform(init_pos[1], init_pos[0])
+            init_pos[:2] = transformer.transform(*init_pos[:2])
+
+            print(init_pos)
 
             # Solve the ODE system for one particle
             result = solve_ivp(state_func, time_span, y0=init_pos, method=self.method, t_eval=times)
@@ -111,9 +117,9 @@ class LagrangianTrajectories:
             trajectories[i] = result.y
 
         # transform back to lat/lon
-        trajectories[:, 0], trajectories[:, 1] = transformer.transform(
-            trajectories[:, 0], trajectories[:, 1], direction='INVERSE'
-        )
+        trajectories[:, 0], trajectories[:, 1] = transformer.transform(trajectories[:, 0],
+                                                                       trajectories[:, 1],
+                                                                       direction='INVERSE')
 
         # transform time back to datetime
         times = pd.to_datetime(times, origin=self.start_time, unit='s')
@@ -131,7 +137,7 @@ class LagrangianTrajectories:
         return trajectories
 
 
-def visualize_trajectories(trajectories, wind_data, altitude=90e3, fig_name="trajectories.png"):
+def visualize_trajectories(trajectories, wind_data, start_time='', fig_name="trajectories.png"):
     # Plot one trajectory
     import matplotlib.pyplot as plt
     import cartopy.crs as ccrs
@@ -155,6 +161,8 @@ def visualize_trajectories(trajectories, wind_data, altitude=90e3, fig_name="tra
     gl.left_labels = True
 
     # visualize mean wind streamlines
+    altitude = trajectories.sel(particle=0).z.isel(time=0).values
+
     wind_data = wind_data.sel(time=slice(trajectories.time[-1], trajectories.time[0]))
     wind_data = wind_data.sel(z_mc=altitude, method='nearest').mean(dim='time')
 
@@ -189,7 +197,7 @@ def visualize_trajectories(trajectories, wind_data, altitude=90e3, fig_name="tra
 
     ax.legend(loc='upper right', frameon=True)
 
-    ax.set_title("Lagrangian Back-trajectories")
+    ax.set_title(f"Lagrangian Back-trajectories {' '.join(start_time.split('T'))} UTC")
     plt.show()
 
     fig.savefig(fig_name, dpi=300)
@@ -202,24 +210,28 @@ if __name__ == "__main__":
 
     wind_data = xr.open_dataset(filename)  # Dataset containing 'u', 'v', 'w'
 
+    # Apply radar correction: time delay of 50 minutes
+    lagged_time = wind_data.time + pd.Timedelta(minutes=-50)
+    wind_data = wind_data.assign_coords(time=lagged_time)
+
     # Define start time with format yyyy-mm-ddTHH:MM:SS
     start_time = "2025-02-19T22:00:00"
 
     # Define initial particle positions (lat, lon, z[meters]): Kuehlungsborn, Germany at 95.75 km
-    initial_positions = [(54.12, 11.77, 90e3), (54.12, 11.77, 95.9e3), (54.12, 11.77, 100e3)]
+    initial_positions = [(11.77, 54.12, 95.9e3), (11.77, 54.12, 95.75e3), ]
 
     # Define time step in seconds. It can be negative for backward trajectory calculation
-    time_step = -900  # 30 minutes
+    time_step = -600  # 30 minutes
     num_steps = 300  # number of time steps
 
-    solver_method = 'RK23'  # options: ['RK23', 'RK45', 'DOP853', 'LSODA']
+    solver_method = 'RK45'  # options: ['RK23', 'RK45', 'DOP853', 'LSODA']
     interp_method = 'linear'  # options: ['linear', 'nearest', 'cubic', 'quadratic']
 
     # Initialize the trajectory calculator: Using Runge-Kutta 2nd order method
     solver = LagrangianTrajectories(wind_data, dt=time_step, start_time=start_time,
                                     integration_method=solver_method,
                                     interpolation_method=interp_method,
-                                    verbose=True)
+                                    verbose=False, ensemble=False)
 
     # Compute trajectories
     trajectories = solver.advect_particles(initial_positions, num_steps=num_steps)
@@ -229,8 +241,7 @@ if __name__ == "__main__":
     trajectories.to_netcdf(os.path.join(base_path, filename))
 
     # Visualize trajectories
-    fig_name = f"/home/deterministic-nonperiodic/trajectories_{solver_method}_{interp_method}.png"
+    fig_name = (f"/home/deterministic-nonperiodic/rc_trajectories_{solver_method}"
+                f"_{interp_method}_{start_time}.png")
 
-    visualize_trajectories(trajectories, wind_data,
-                           altitude=initial_positions[0][2],
-                           fig_name=fig_name)
+    visualize_trajectories(trajectories, wind_data, fig_name=fig_name, start_time=start_time)
