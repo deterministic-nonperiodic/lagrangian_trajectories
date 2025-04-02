@@ -40,9 +40,11 @@ def generate_eval_time(duration, timestep):
     timestep = convert_to_seconds(timestep, 's')
 
     # Compute the number of steps
-    num_steps = int(duration / abs(timestep)) + 1  # Include zero
+    num_steps = int(abs(duration) / abs(timestep)) + 1  # Include zero
 
-    return np.linspace(0, np.sign(timestep) * duration, num_steps)
+    direction = np.sign(timestep) * np.sign(duration)
+
+    return np.linspace(0, direction * abs(duration), num_steps)
 
 
 class LagrangianTrajectories:
@@ -272,9 +274,9 @@ if __name__ == "__main__":
     # Define initial particle positions (lat, lon, z[meters]):
     initial_positions = [(11.46, 54.07, 95.9e3), (11.46, 54.07, 95.75e3)]
     #
-    # # Define time step in seconds. It can be negative for backward trajectory calculation
-    time_step = "-10 minutes"  # Time step, flexible [min, m, s, sec, h, hours, ...]
-    duration = "20.75 hours"  # Duration of the simulation
+    # Define simulation duration and time step. It can be negative for backward trajectories
+    time_step = "10 minutes"  # Time step, flexible units [min, m, s, sec, h, hours, ...]
+    duration = "-20.75 hours"  # Duration of the simulation
 
     solver_method = 'LSODA'  # options: ['RK23', 'RK45', 'DOP853', 'LSODA']
     interp_method = 'linear'  # options: ['linear', 'nearest', 'cubic', 'quadratic']
