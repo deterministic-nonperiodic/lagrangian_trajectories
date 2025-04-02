@@ -2,7 +2,8 @@ import os
 import numpy as np
 import xarray as xr
 import pandas as pd
-from mpmath import extend
+from dateutil import parser
+
 from scipy.integrate import solve_ivp
 
 from pyproj import Transformer
@@ -11,8 +12,41 @@ from pyproj import Transformer
 transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 
 
+def generate_eval_time(duration, timestep):
+    """
+    Generate an array of evaluation times starting at 0 and incrementing by a specified timestep.
+
+    :param duration: Total duration (can be a string, int, or float).
+    :param timestep: Time step (can be a string, int, or float). It can be negative for backward time progression.
+    :return: A numpy array of evaluation times in seconds.
+    :raises ValueError: If 'duration' or 'timestep' are in an unknown format.
+    """
+
+    # Return empty array if duration is None
+    if duration is None:
+        return np.zeros(1)
+
+    # Helper function to convert duration or timestep to seconds
+    def convert_to_seconds(value, unit='s'):
+        if isinstance(value, (int, float)):
+            return pd.Timedelta(value, unit=unit).total_seconds()
+        elif isinstance(value, str):
+            return pd.Timedelta(value).total_seconds()
+        else:
+            raise ValueError(f"Unknown format for argument '{value}'")
+
+    # Convert both duration and timestep to seconds
+    duration = convert_to_seconds(duration)
+    timestep = convert_to_seconds(timestep, 's')
+
+    # Compute the number of steps
+    num_steps = int(duration / abs(timestep)) + 1  # Include zero
+
+    return np.linspace(0, np.sign(timestep) * duration, num_steps)
+
+
 class LagrangianTrajectories:
-    def __init__(self, data, dt=60, integration_method="RK23", start_time=None,
+    def __init__(self, data, timestep=None, integration_method="RK23", start_time=None,
                  interpolation_method="linear", verbose=False, ensemble=False):
         """
         Initialize the Lagrangian trajectory calculator.
@@ -27,32 +61,43 @@ class LagrangianTrajectories:
         - verbose: Print maximum wind velocity at each time step
         - ensemble: Compute ensemble trajectories (default: False)
         """
+
+        self.verbose = verbose
+
         self.wind = data[["u", "v", "w"]]
-        self.dt = dt
+
+        if timestep is None:
+            # estimate from dataset and convert to seconds
+            timestep = np.median(np.diff(self.wind.time.values)) / np.timedelta64(1, 's')
+
+        self.timestep = timestep
         self.method = integration_method
         self.interp_method = interpolation_method
 
         time = self.wind.time.values
 
-        self.verbose = verbose
-
         if start_time is None:
             self.start_time = time[0]
         else:
+            start_time = parser.parse(start_time)
             self.start_time = pd.to_datetime(start_time).to_numpy()
 
         # Compute relative time in seconds
-        self.rel_time = 1e-9 * (time - self.start_time).astype("timedelta64[ns]")
+        self.rel_time = (time - self.start_time).astype("timedelta64[ns]") / np.timedelta64(1, 's')
 
         # Convert lat/lon to curvilinear x/y in meters using the map projection
         x_mesh, y_mesh = transformer.transform(
             *np.meshgrid(data.lon.values, data.lat.values, indexing="ij")
         )
 
+        # Adjust wind components
+        # self.wind['u'] = self.wind['u'] / np.cos(np.deg2rad(self.wind.lat))
+
         # Replace lon lat with curvilinear coordinates in meters
-        self.wind = self.wind.assign_coords(lon=x_mesh[:, 0],
-                                            lat=y_mesh[0, :],
-                                            rel_time=self.rel_time)
+        self.wind = self.wind.assign_coords(
+            lon=x_mesh[:, 0],
+            lat=y_mesh[0, :],
+            rel_time=self.rel_time)
 
     def velocity(self, time, state):
         """Compute wind velocity at given positions."""
@@ -62,30 +107,42 @@ class LagrangianTrajectories:
         time = pd.to_datetime(time, origin=self.start_time, unit='s')
 
         # Create interpolation points: (time, z, lat, lon)
-        points = dict(z_mc=z, z_ifc=z, lat=y, lon=x)
+        points = dict(z_mc=z, lat=y, lon=x)
+
+        if 'z_ifc' in self.wind.dims: points['z_ifc'] = z
 
         # Perform interpolation. Velocity is set to zero if the particle leaves the domain
-        wind = self.wind.interp(time=time, **points, method=self.interp_method,
+        wind = self.wind.interp(time=time, **points,
+                                method=self.interp_method,
                                 kwargs={'fill_value': 0.0})
 
         if self.verbose:
-            print(time, "Max u: ", wind.u.max().values, " Max w: ", wind.w.max().values)
+            print(time,
+                  "Max u: {:4.4f}".format(wind.u.max().values), ' ',
+                  "Max w: {:0.4f}".format(wind.w.max().values)
+                  )
 
-        return np.column_stack([wind.u.data, wind.v.data, wind.w.data])
+        # earth_radius = 6.3712e6  # Radius of Earth (m)
+        u_mp = wind.u.data  # / (earth_radius * np.cos(np.deg2rad(wind.lat.data)))
+        v_mp = wind.v.data  # / earth_radius
 
-    def advect_particles(self, initial_positions, num_steps):
+        return np.column_stack([u_mp, v_mp, wind.w.data])
+
+    def advect_particles(self, initial_positions, duration=None):
         """
         Compute trajectories for a set of particles.
 
         Parameters:
         - initial_positions: list of (lat, lon, z) tuples
-        - num_steps: Number of integration steps
+        - duration: Length of the simulation in time units (default: None)
 
         Returns:
         - xarray.Dataset containing particle trajectories with dimensions ('particle', 'time')
         """
-        num_particles = len(initial_positions)
-        times = np.arange(0, num_steps * self.dt, self.dt)
+
+        # Get end date based on simulation duration
+        # end_date = self.start_time + np.sign(self.dt) * pd.Timedelta(duration)
+        times = generate_eval_time(duration, self.timestep)
 
         # check if time is within data bounds. clip array to valid range
         rel_time = self.rel_time.astype(float)
@@ -94,13 +151,9 @@ class LagrangianTrajectories:
         # calculate integration time span
         time_span = (times[0], times[-1])
 
-        # Define integration function: We are solving dx/dt = v(t, x, y, z)
-        def state_func(t, state):
-            return self.velocity(t, state)
-
         # Solve the ODE system
         initial_positions = np.array(initial_positions)
-        state_size = initial_positions.shape[1]
+        num_particles, state_size = initial_positions.shape[:2]
 
         # initialize trajectories array
         trajectories = np.zeros((num_particles, state_size, times.size))
@@ -109,12 +162,9 @@ class LagrangianTrajectories:
             # transform initial position to meters: Transpose lat/lon
             init_pos[:2] = transformer.transform(*init_pos[:2])
 
-            print(init_pos)
-
-            # Solve the ODE system for one particle
-            result = solve_ivp(state_func, time_span, y0=init_pos, method=self.method, t_eval=times)
-
-            trajectories[i] = result.y
+            # Solve the ODE system for one particle. We are solving dx/dt = v(t, x, y, z)
+            trajectories[i] = solve_ivp(self.velocity, t_span=time_span, y0=init_pos,
+                                        t_eval=times, method=self.method).y
 
         # transform back to lat/lon
         trajectories[:, 0], trajectories[:, 1] = transformer.transform(trajectories[:, 0],
@@ -129,10 +179,12 @@ class LagrangianTrajectories:
             {
                 "lon": (("particle", "time"), trajectories[:, 0]),
                 "lat": (("particle", "time"), trajectories[:, 1]),
-                "z": (("particle", "time"), trajectories[:, 2])
+                "z": (("particle", "time"), 1e-3 * trajectories[:, 2])
             },
             coords={"particle": np.arange(num_particles), "time": times}
         )
+        trajectories['z'].attrs['standard_name'] = 'geometric height'
+        trajectories['z'].attrs['units'] = 'kilometers'
 
         return trajectories
 
@@ -164,7 +216,7 @@ def visualize_trajectories(trajectories, wind_data, start_time='', fig_name="tra
     altitude = trajectories.sel(particle=0).z.isel(time=0).values
 
     wind_data = wind_data.sel(time=slice(trajectories.time[-1], trajectories.time[0]))
-    wind_data = wind_data.sel(z_mc=altitude, method='nearest').mean(dim='time')
+    wind_data = wind_data.sel(z_mc=1e3 * altitude, method='nearest').mean(dim='time')
 
     wind_data.plot.streamplot(x="lon", y="lat", u="u", v="v",
                               color='black', ax=ax, transform=ccrs.PlateCarree(),
@@ -173,8 +225,8 @@ def visualize_trajectories(trajectories, wind_data, start_time='', fig_name="tra
     # plot paths
     markers = ['o', 's', 'd', '^', 'v', '<', '>', 'p', 'h', 'D', 'P', 'X']
 
-    v_min = 1e-3 * trajectories["z"].min().values
-    v_max = 1e-3 * trajectories["z"].max().values
+    v_min = trajectories["z"].min().values
+    v_max = trajectories["z"].max().values
 
     for i in range(trajectories.particle.size):
         # Plot trajectory line
@@ -182,7 +234,6 @@ def visualize_trajectories(trajectories, wind_data, start_time='', fig_name="tra
                 color='k', alpha=0.6, linewidth=1.6, transform=ccrs.PlateCarree())
         # Get starting altitude point
         particle = trajectories.sel(particle=i)
-        particle['z'] = 1e-3 * particle['z']  # convert to km
 
         start_altitude = np.round(particle.z.isel(time=0).values, 1)
 
@@ -206,38 +257,39 @@ def visualize_trajectories(trajectories, wind_data, start_time='', fig_name="tra
 if __name__ == "__main__":
     # Load simulated 3D wind field (example)
     base_path = "/home/deterministic-nonperiodic/IAP/Experiments/vortex/data/FALCON/"
-    filename = os.path.join(base_path, "UA-ICON_NWP_atm_ML_DOM01_falcon_20250219-20.nc")
+    filename = os.path.join(base_path, "UA-ICON_NWP_atm_ML_DOM01_falcon2_20250219-20.nc")
 
     wind_data = xr.open_dataset(filename)  # Dataset containing 'u', 'v', 'w'
+    # wind_data = wind_data.chunk(time=10, z_mc=10, z_ifc=10, lat=111, lon=111)
 
     # Apply radar correction: time delay of 50 minutes
-    lagged_time = wind_data.time + pd.Timedelta(minutes=-50)
+    lagged_time = wind_data.time + pd.Timedelta(minutes=-0)
     wind_data = wind_data.assign_coords(time=lagged_time)
 
     # Define start time with format yyyy-mm-ddTHH:MM:SS
-    start_time = "2025-02-19T22:00:00"
+    start_time = "2025-02-20T00:30:00"
 
-    # Define initial particle positions (lat, lon, z[meters]): Kuehlungsborn, Germany at 95.75 km
-    initial_positions = [(11.77, 54.12, 95.9e3), (11.77, 54.12, 95.75e3), ]
+    # Define initial particle positions (lat, lon, z[meters]):
+    initial_positions = [(11.46, 54.07, 95.9e3), (11.46, 54.07, 95.75e3)]
+    #
+    # # Define time step in seconds. It can be negative for backward trajectory calculation
+    time_step = "-10 minutes"  # Time step, flexible [min, m, s, sec, h, hours, ...]
+    duration = "20.75 hours"  # Duration of the simulation
 
-    # Define time step in seconds. It can be negative for backward trajectory calculation
-    time_step = -600  # 30 minutes
-    num_steps = 300  # number of time steps
-
-    solver_method = 'RK45'  # options: ['RK23', 'RK45', 'DOP853', 'LSODA']
+    solver_method = 'LSODA'  # options: ['RK23', 'RK45', 'DOP853', 'LSODA']
     interp_method = 'linear'  # options: ['linear', 'nearest', 'cubic', 'quadratic']
 
     # Initialize the trajectory calculator: Using Runge-Kutta 2nd order method
-    solver = LagrangianTrajectories(wind_data, dt=time_step, start_time=start_time,
+    solver = LagrangianTrajectories(wind_data, timestep=time_step, start_time=start_time,
                                     integration_method=solver_method,
                                     interpolation_method=interp_method,
-                                    verbose=False, ensemble=False)
+                                    verbose=True, ensemble=False)
 
     # Compute trajectories
-    trajectories = solver.advect_particles(initial_positions, num_steps=num_steps)
+    trajectories = solver.advect_particles(initial_positions, duration=duration)
 
     # Store file as netcdf
-    filename = f"back_trajectories_{solver_method}_{interp_method}_{start_time}.nc"
+    filename = f"trajectories_{solver_method}_{interp_method}_{start_time}.nc"
     trajectories.to_netcdf(os.path.join(base_path, filename))
 
     # Visualize trajectories
