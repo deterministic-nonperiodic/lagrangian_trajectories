@@ -49,7 +49,7 @@ def generate_eval_time(duration, timestep):
 
 class LagrangianTrajectories:
     def __init__(self, data, timestep=None, integration_method="RK23", start_time=None,
-                 interpolation_method="linear", verbose=False, ensemble=False):
+                 interpolation_method="linear", verbose=False, time_lag=None, ensemble=False):
         """
         Initialize the Lagrangian trajectory calculator.
 
@@ -57,7 +57,8 @@ class LagrangianTrajectories:
         - wind_data: xarray.Dataset containing 'u', 'v', 'w' wind components
           with dimensions ('time', 'z', 'lat', 'lon')
         - dt: Time step in seconds (default: 60s)
-        - integration_method: Integration method, one of ['RK23', 'RK45', 'DOP853', 'LSODA'] (default: 'RK2')
+        - integration_method: Integration method. one of ['RK23', 'RK45', 'DOP853', 'LSODA']
+                              (default: 'RK2')
         - interpolation_method: Interpolation method, one of ['linear', 'nearest']
         - start_time: Start time for the simulation in format 'yyyy-mm-ddTHH:MM:SS'
         - verbose: Print maximum wind velocity at each time step
@@ -67,6 +68,11 @@ class LagrangianTrajectories:
         self.verbose = verbose
 
         self.wind = data[["u", "v", "w"]]
+
+        # Check if the dataset contains the required dimensions
+        if time_lag is not None:
+            # Apply radar correction: time delay of 50 minutes
+            self.wind = self.wind.assign_coords(time=self.wind.time + pd.Timedelta(time_lag))
 
         if timestep is None:
             # estimate from dataset and convert to seconds
@@ -125,6 +131,7 @@ class LagrangianTrajectories:
                   )
 
         # earth_radius = 6.3712e6  # Radius of Earth (m)
+
         u_mp = wind.u.data  # / (earth_radius * np.cos(np.deg2rad(wind.lat.data)))
         v_mp = wind.v.data  # / earth_radius
 
@@ -264,28 +271,26 @@ if __name__ == "__main__":
     wind_data = xr.open_dataset(filename)  # Dataset containing 'u', 'v', 'w'
     # wind_data = wind_data.chunk(time=10, z_mc=10, z_ifc=10, lat=111, lon=111)
 
-    # Apply radar correction: time delay of 50 minutes
-    lagged_time = wind_data.time + pd.Timedelta(minutes=-0)
-    wind_data = wind_data.assign_coords(time=lagged_time)
-
     # Define start time with format yyyy-mm-ddTHH:MM:SS
     start_time = "2025-02-20T00:30:00"
 
     # Define initial particle positions (lat, lon, z[meters]):
     initial_positions = [(11.46, 54.07, 95.9e3), (11.46, 54.07, 95.75e3)]
     #
-    # Define simulation duration and time step. It can be negative for backward trajectories
-    time_step = "10 minutes"  # Time step, flexible units [min, m, s, sec, h, hours, ...]
-    duration = "-20.75 hours"  # Duration of the simulation
+    # # Define time step in seconds. It can be negative for backward trajectory calculation
+    time_step = "-10 minutes"  # Time step, flexible [min, m, s, sec, h, hours, ...]
+    duration = "20 hours"  # Duration of the simulation
 
-    solver_method = 'LSODA'  # options: ['RK23', 'RK45', 'DOP853', 'LSODA']
+    time_lag = "50 minutes"  # Time lag for radar correction
+
+    solver_method = 'RK23'  # options: ['RK23', 'RK45', 'DOP853', 'LSODA']
     interp_method = 'linear'  # options: ['linear', 'nearest', 'cubic', 'quadratic']
 
     # Initialize the trajectory calculator: Using Runge-Kutta 2nd order method
     solver = LagrangianTrajectories(wind_data, timestep=time_step, start_time=start_time,
-                                    integration_method=solver_method,
-                                    interpolation_method=interp_method,
-                                    verbose=True, ensemble=False)
+                                    integration_method=solver_method, time_lag=time_lag,
+                                    interpolation_method=interp_method, verbose=True,
+                                    ensemble=False)
 
     # Compute trajectories
     trajectories = solver.advect_particles(initial_positions, duration=duration)
