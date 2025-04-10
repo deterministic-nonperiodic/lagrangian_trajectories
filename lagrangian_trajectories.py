@@ -15,8 +15,11 @@ from joblib import Parallel, delayed
 
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from pyproj import Transformer
+import cartopy.crs as ccrs
+import cartopy.feature as creature
+
 import alphashape
+from pyproj import Transformer
 from shapely.geometry import Point
 
 # Use an equal-area projection (Eckert IV) to convert (lat, lon) to meters
@@ -257,10 +260,7 @@ class LagrangianTrajectories:
 
 
 def visualize_trajectories(trajectories, wind, fig_name=None):
-    # Plot one trajectory
-    import matplotlib.pyplot as plt
-    import cartopy.crs as ccrs
-    import cartopy.feature as cfeature
+    """Plot one trajectories on a map"""
 
     # Create figure and axis with geographic projection
     fig, ax = plt.subplots(figsize=(9, 6), constrained_layout=True,
@@ -471,6 +471,6 @@ if __name__ == "__main__":
 
     # Visualize trajectories
     fig_name = (f"/home/deterministic-nonperiodic/rc_trajectories_{solver_method}"
-                f"_{interp_method}_{start_time}.png")
+                f"_{interp_method}_{start_time}_lag{time_lag}.png")
 
-    visualize_trajectories(trajectories, wind_data, fig_name=fig_name, start_time=start_time)
+    visualize_trajectories(trajectories_dataset, wind_data, fig_name=fig_name)
