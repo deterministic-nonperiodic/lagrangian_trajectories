@@ -10,18 +10,17 @@ from scipy.integrate import solve_ivp
 from sklearn.mixture import GaussianMixture
 from sklearn.cluster import DBSCAN
 
+from tqdm import tqdm
+from joblib import Parallel, delayed
+
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from pyproj import Transformer
 import alphashape
 from shapely.geometry import Point
 
-from tqdm import tqdm
-from joblib import Parallel, delayed
-
 # Use an equal-area projection (Eckert IV) to convert (lat, lon) to meters
 transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 
 
 def custom_viridis():
