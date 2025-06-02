@@ -235,18 +235,28 @@ class LagrangianTrajectories:
     def intersection_event(self, time, state, target=None,
                            horizontal_tolerance=1e3, vertical_tolerance=1e3):
         """
-        Check if any particle trajectory intersects with the target location using geodesic and vertical distances.
+        Determines whether any particle intersects a target within specified horizontal and
+        vertical tolerances. The intersection is computed using geodesic distances and normalized
+        squared errors for horizontal and vertical components. The method returns a metric-based
+        value indicating how close the intersection condition is to being met.
 
-        Parameters:
-        - time: float, time in seconds since self.start_time
-        - state: flat ndarray, shape (state_size * num_particles,), representing the current state of the particles
-        - target: xarray.Dataset with 'lon', 'lat', 'z' coordinates for the target position
-        - horizontal_tolerance: float [meters], geodesic distance tolerance in horizontal plane
-        - vertical_tolerance: float [meters], vertical distance tolerance
-
-        Returns:
-        - float: Event function value. Negative or zero triggers an event in solve_ivp.
+        :param time: Simulation time in seconds since the start of the simulation.
+        :param state: Particle states as a numpy array, including x, y, and z positions.
+        :param target: Optional xarray dataset containing the target location information
+                       with coordinates (lon, lat, and z). If None, only a horizontal tolerance
+                       offset is returned.
+        :param horizontal_tolerance: Horizontal tolerance in meters for determining intersection.
+                                     Default is 1000 m.
+        :param vertical_tolerance: Vertical tolerance in meters for determining intersection.
+                                   Default is 1000 m.
+        :return: Metric indicating the distance from the intersection condition. A negative value
+                 indicates no intersection, while a positive value indicates the intersection
+                 condition is met.
+        :rtype: float
         """
+        if horizontal_tolerance is None:
+            horizontal_tolerance = 5e3
+
         if target is None:
             return horizontal_tolerance + 1.0
 
@@ -272,14 +282,17 @@ class LagrangianTrajectories:
         vert_term = (vert_distances / vertical_tolerance) ** 2
         combined_metric = horiz_term + vert_term
 
-        # Event triggers when any particle is within the tolerance ellipsoid
-        min_metric = np.nanmin(combined_metric)
+        # Event triggers when any particle is within tolerance ellipsoid
+        particle_id = np.argmin(combined_metric)
+        min_metric = combined_metric[particle_id]
+
         event_value = min_metric - 1.0
 
-        if self.verbose > 1:
-            print(f"Event check at {timestamp}: event_value={event_value:.3f}, "
-                  f"min horizontal distance={1e-3 * np.nanmin(horiz_distances):.3f} km, "
-                  f"min vertical distance={1e-3 * np.nanmin(vert_distances):.3f} km")
+        if self.verbose > 0:
+            print(
+                f"Event check at {timestamp}, particle {particle_id}: event_value={event_value:.3f}, "
+                f"horizontal distance={1e-3 * np.nanmin(horiz_distances):.3f} km, "
+                f"vertical distance={1e-3 * np.nanmin(vert_distances):.3f} km")
 
         return event_value
 
