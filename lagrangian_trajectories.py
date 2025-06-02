@@ -11,13 +11,14 @@ from scipy.integrate import solve_ivp
 from tools import convert_to_seconds, save_cf_compliant
 from tools import generate_eval_time, read_falcon, sigma_components, generate_mean_wind
 
-from pyproj import Transformer
+from pyproj import Transformer, Geod
 
 from joblib import Parallel, delayed
 from visualization import plot_orbit_and_ensemble_3d, visualize_trajectories_percentile_kde
 
 # Use an equal-area projection (Eckert IV) to convert (lat, lon) to meters
 transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+reference_geode = Geod(ellps="WGS84")
 
 # Adjust memory size per chunk
 dask.config.set({"array.chunk-size": "256 MiB"})  # should fit in 256 GB RAM
@@ -231,46 +232,56 @@ class LagrangianTrajectories:
         # Return as a flat array: shape (num_particles * state_size,...)
         return wind_vector.reshape(-1)
 
-    def intersection_event(self, time, state, target=None, distance_tolerance=1e3):
+    def intersection_event(self, time, state, target=None,
+                           horizontal_tolerance=1e3, vertical_tolerance=1e3):
         """
-        Check if any particle trajectory intersects with the target location.
+        Check if any particle trajectory intersects with the target location using geodesic and vertical distances.
 
         Parameters:
         - time: float, time in seconds since self.start_time
-        - state: flat ndarray, shape (state_size * num_particles),
-            representing the current state of the particles
+        - state: flat ndarray, shape (state_size * num_particles,), representing the current state of the particles
         - target: xarray.Dataset with 'lon', 'lat', 'z' coordinates for the target position
-        - distance_tolerance: float [meters].
-            Minimum 3D distance at which a particle is considered to intersect
+        - horizontal_tolerance: float [meters], geodesic distance tolerance in horizontal plane
+        - vertical_tolerance: float [meters], vertical distance tolerance
 
         Returns:
         - float: Event function value. Negative or zero triggers an event in solve_ivp.
         """
         if target is None:
-            return distance_tolerance + 1.0
+            return horizontal_tolerance + 1.0
 
         timestamp = self.start_time + pd.to_timedelta(time, unit='s')
         x, y, z = np.asarray(state).reshape(self.state_size, -1)
 
-        try:
-            target_point = target.sel(time=timestamp, method='nearest')
-        except Exception as e:
-            if self.verbose > 0:
-                print(
-                    f"Warning: Failed to find nearest target time at {timestamp}. "
-                    f"Skipping event. Error: {e}")
-            return distance_tolerance + 1.0
+        target_point = target.sel(time=timestamp, method='nearest')
+        lon0, lat0 = target_point.lon.values, target_point.lat.values
 
-        x0, y0 = transformer.transform(target_point.lon.values, target_point.lat.values)
-        z0 = target_point.z.values * 1e3
+        # Convert particle x/y to lon/lat for geodesic computation
+        lons, lats = transformer.transform(x.flatten(), y.flatten(), direction='INVERSE')
+        lon0_array = np.full_like(lons, lon0)
+        lat0_array = np.full_like(lats, lat0)
 
-        distance = np.sqrt((x - x0) ** 2 + (y - y0) ** 2 + (z - z0) ** 2)
-        event_values = np.nanmin(distance) - distance_tolerance
+        # Compute horizontal geodesic distances
+        _, _, horiz_distances = reference_geode.inv(lons, lats, lon0_array, lat0_array)
+
+        # Compute vertical distances
+        vert_distances = np.abs(z.flatten() - target_point.z.values * 1e3)
+
+        # Compute combined metric using normalized squared distances
+        horiz_term = (horiz_distances / horizontal_tolerance) ** 2
+        vert_term = (vert_distances / vertical_tolerance) ** 2
+        combined_metric = horiz_term + vert_term
+
+        # Event triggers when any particle is within the tolerance ellipsoid
+        min_metric = np.nanmin(combined_metric)
+        event_value = min_metric - 1.0
 
         if self.verbose > 1:
-            print(f"Event check at {timestamp}: distance={1e-3 * np.nanmin(distance)} km")
+            print(f"Event check at {timestamp}: event_value={event_value:.3f}, "
+                  f"min horizontal distance={1e-3 * np.nanmin(horiz_distances):.3f} km, "
+                  f"min vertical distance={1e-3 * np.nanmin(vert_distances):.3f} km")
 
-        return event_values
+        return event_value
 
     def advect_particles(self, start_positions, duration=None, end_date=None,
                          ensemble_size=None, target=None, distance_tolerance=None):
