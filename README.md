@@ -41,7 +41,7 @@ trajectories = model.advect_particles(
     start_positions=[(11.4, 54.1, 96000)],  # (lon [deg], lat [deg], z [meters])
     duration="3h",
     ensemble_size=20,
-    target=target_ds,
-    distance_tolerance=500e3
+    target=target_ds,  # Optional xarray.Dataset with a moving target
+    distance_tolerance=10e3
 )
 ```
