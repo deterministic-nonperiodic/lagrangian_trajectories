@@ -31,14 +31,14 @@ from lagrangian import LagrangianTrajectories
 # Create the model
 model = LagrangianTrajectories(
     data=wind_data,  # xarray.Dataset with 'u', 'v', 'w'
-    timestep=600,    # in seconds
+    timestep="10 minutes",    # Any pandas.Timedelta compatible
     noise_type='lognormal',
     start_time="2025-02-20T00:00:00"
 )
 
 # Run the simulation
 trajectories = model.advect_particles(
-    start_positions=[(11.4, 54.1, 96000)],
+    start_positions=[(11.4, 54.1, 96000)],  # (lon [deg], lat [deg], z [meters])
     duration="3h",
     ensemble_size=20,
     target=target_ds,
